@@ -1,0 +1,22 @@
+# app-rogue — minimal caller workflow.
+#
+# The whole pipeline body lives in crosstalkis/shared-workflows@v1.
+# This file delegates and supplies the application identity, nothing else.
+# Bumping the shared-workflows tag is the only knob the app team owns here.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required so the reusable can mint a GHA OIDC JWT
+  contents: read
+
+jobs:
+  release:
+    uses: crosstalkis/shared-workflows/.github/workflows/conjur-fetch.yml@v1
+    with:
+      app-name: rogue
