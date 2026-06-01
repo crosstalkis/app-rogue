@@ -1,0 +1,74 @@
+name: verify-v3-negative
+
+# v3 (SAS-anchored) Conjur auth NEGATIVE test for app-rogue.
+# This repo's sas_id custom property = "sas-rogue", but no Conjur host
+# exists at host/sas/sas-rogue. The JWT carries a valid repo_property_sas_id
+# claim — but the host lookup fails. Expected outcome: HTTP 401 at JWT
+# exchange (Conjur cannot find a host to authenticate as).
+#
+# A FAILED workflow run here is the PASSING test result. A successful run
+# would indicate a security regression (rogue SAS values can authenticate).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify:
+    runs-on: lab-runners
+    env:
+      AUDIENCE: conjur/lab/sas
+      CONJUR_URL: https://conjur-oss.conjur.svc.cluster.local
+      CONJUR_SERVICE_ID: gha-v3
+      CONJUR_ACCOUNT: lab
+      CONJUR_CACERT: /etc/conjur/ssl/ca.pem
+      EXPECTED_SAS: sas-rogue
+    steps:
+      - name: Mint JWT and attempt v3 exchange (expect 401)
+        run: |
+          set -euo pipefail
+
+          echo "::group::1. Mint JWT (audience=${AUDIENCE})"
+          jwt=$(curl -sSf \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" \
+            | jq -r '.value')
+          echo "::add-mask::${jwt}"
+          echo "JWT minted (length=${#jwt})"
+
+          payload_b64="${jwt#*.}"
+          payload_b64="${payload_b64%%.*}"
+          b64="${payload_b64//-/+}"
+          b64="${b64//_/\/}"
+          pad=$(( (4 - ${#b64} % 4) % 4 ))
+          b64="${b64}$(printf '%*s' "${pad}" '' | tr ' ' '=')"
+          payload_json=$(printf '%s' "${b64}" | base64 -d)
+          actual_sas=$(jq -r '.repo_property_sas_id // "MISSING"' <<< "${payload_json}")
+          echo "JWT carries repo_property_sas_id = ${actual_sas}"
+          if [[ "${actual_sas}" != "${EXPECTED_SAS}" ]]; then
+            echo "::error::Pre-check failed: expected ${EXPECTED_SAS} (the rogue SAS), got ${actual_sas}"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::2. Attempt JWT exchange — should FAIL (no Conjur host for sas-rogue)"
+          http_code=$(curl -sS -o /tmp/conjur-resp -w '%{http_code}' \
+            --cacert "${CONJUR_CACERT}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "jwt=${jwt}" \
+            "${CONJUR_URL}/authn-jwt/${CONJUR_SERVICE_ID}/${CONJUR_ACCOUNT}/authenticate")
+          echo "HTTP ${http_code}"
+          echo "Response body:"
+          cat /tmp/conjur-resp
+          echo ""
+
+          # Authn failure is the EXPECTED outcome.
+          if [[ "${http_code}" == "200" ]]; then
+            echo "::error::SECURITY REGRESSION — sas-rogue successfully authenticated, expected 401"
+            exit 1
+          fi
+          echo "VERIFY_V3_NEGATIVE sas=${EXPECTED_SAS} repo=${GITHUB_REPOSITORY} http_code=${http_code} result=AUTHN_DENIED_AS_EXPECTED"
+          echo "::endgroup::"
